@@ -1,0 +1,26 @@
+[
+    {
+        "api": "torch.nn.Cell",
+        "line": 9,
+        "col_offset": 10,
+        "file": "files_to_be_converted/new/test.py"
+    },
+    {
+        "api": "torch.nn.Module",
+        "line": 11,
+        "col_offset": 28,
+        "file": "files_to_be_converted/new/test.py"
+    },
+    {
+        "api": "torch.nn.Cell",
+        "line": 18,
+        "col_offset": 10,
+        "file": "files_to_be_converted/new/test.py"
+    },
+    {
+        "api": "torch.nn.Module",
+        "line": 20,
+        "col_offset": 19,
+        "file": "files_to_be_converted/new/test.py"
+    }
+]
