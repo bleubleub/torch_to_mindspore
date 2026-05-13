@@ -14,6 +14,8 @@ TENSOR_CONTEXT_ATTRS = {'shape', 'dtype', 'device'}
 
 FUNCTION_PARAM_TENSOR_HINTS = {'shape', 'dtype', 'device', 'size', 'view'}
 
+NON_TORCH_CALL_CONTEXT_ROOTS = {'Dtype'}
+
 TENSOR_METHODS = {
     'H', 'T', '__abs__', '__add__', '__and__', '__array__', '__array_priority__', '__array_wrap__', '__bool__', '__complex__', '__contains__', '__cuda_array_interface__',
     '__deepcopy__', '__delattr__', '__delitem__', '__dict__', '__dir__', '__div__', '__dlpack__', '__dlpack_device__', '__doc__', '__eq__', '__float__', '__floordiv__', '__format__',
@@ -220,6 +222,20 @@ class TorchApiVisitor(ast.NodeVisitor):
             return self._is_numpy_expr(node.func)
         return False
 
+    def _is_non_torch_call_context(self, node: ast.AST) -> bool:
+        if not isinstance(node, ast.Call):
+            return False
+        func_name = self._expr_to_name(node.func)
+        if not func_name:
+            return False
+        root = func_name.split('.')[0]
+        return root in NON_TORCH_CALL_CONTEXT_ROOTS
+
+    def _mark_non_tensor_context_receivers(self, node: ast.AST):
+        for child in ast.walk(node):
+            if isinstance(child, ast.Attribute) and child.attr in AMBIGUOUS_TENSOR_METHODS:
+                self._mark_non_tensor_target(child.value)
+
     def _mark_non_tensor_target(self, target: ast.AST):
         name = self._expr_to_name(target)
         if name:
@@ -355,6 +371,12 @@ class TorchApiVisitor(ast.NodeVisitor):
                     for keyword in node.keywords:
                         if keyword.value is not None:
                             self._mark_tensor_context_receivers(keyword.value)
+                elif self._is_non_torch_call_context(node):
+                    for arg in node.args:
+                        self._mark_non_tensor_context_receivers(arg)
+                    for keyword in node.keywords:
+                        if keyword.value is not None:
+                            self._mark_non_tensor_context_receivers(keyword.value)
 
         changed = True
         while changed:
