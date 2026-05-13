@@ -131,6 +131,7 @@ class TorchApiVisitor(ast.NodeVisitor):
         # 使用行号+列号+API名称进行精确去重，Tensor方法额外使用节点id
         self.processed_positions: Set[Any] = set()
         self.tensor_names: Set[str] = set()
+        self.non_tensor_names: Set[str] = set()
 
     def _expr_to_name(self, node: ast.AST) -> Optional[str]:
         if isinstance(node, ast.Name):
@@ -199,10 +200,30 @@ class TorchApiVisitor(ast.NodeVisitor):
         name = self._expr_to_name(receiver)
         if not name:
             return False
+        if name in self.non_tensor_names:
+            return False
         if name in self.tensor_names:
             return True
         parts = name.split('.')
+        if any(".".join(parts[:idx]) in self.non_tensor_names for idx in range(1, len(parts) + 1)):
+            return False
         return any(".".join(parts[:idx]) in self.tensor_names for idx in range(1, len(parts) + 1))
+
+    def _is_numpy_expr(self, node: ast.AST) -> bool:
+        if isinstance(node, ast.Name):
+            return node.id in {'np', 'numpy'}
+        if isinstance(node, ast.Attribute):
+            return self._is_numpy_expr(node.value)
+        if isinstance(node, ast.Subscript):
+            return self._is_numpy_expr(node.value)
+        if isinstance(node, ast.Call):
+            return self._is_numpy_expr(node.func)
+        return False
+
+    def _mark_non_tensor_target(self, target: ast.AST):
+        name = self._expr_to_name(target)
+        if name:
+            self.non_tensor_names.add(name)
 
     def _resolve_api_from_node(self, node: ast.AST) -> Optional[str]:
         """
@@ -230,6 +251,10 @@ class TorchApiVisitor(ast.NodeVisitor):
             
             base_name = curr.id
             chain.insert(0, base_name)
+
+            for idx in range(1, len(chain) + 1):
+                if ".".join(chain[:idx]) in self.non_tensor_names:
+                    return None
             
             # 1. 检查链式调用的基类是否是已知的torch别名。
             if base_name in self.imports:
@@ -294,6 +319,9 @@ class TorchApiVisitor(ast.NodeVisitor):
         if self._is_tensor_factory_api(api) or self._is_tensor_data_expr(node.value):
             for target in node.targets:
                 self._mark_tensor_target(target)
+        elif self._is_numpy_expr(node.value):
+            for target in node.targets:
+                self._mark_non_tensor_target(target)
         self.generic_visit(node)
 
     def visit_For(self, node: ast.For):
