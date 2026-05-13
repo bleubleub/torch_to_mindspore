@@ -12,6 +12,8 @@ AMBIGUOUS_TENSOR_METHODS = {
 
 TENSOR_CONTEXT_ATTRS = {'shape', 'dtype', 'device'}
 
+FUNCTION_PARAM_TENSOR_HINTS = {'shape', 'dtype', 'device', 'size', 'view'}
+
 TENSOR_METHODS = {
     'H', 'T', '__abs__', '__add__', '__and__', '__array__', '__array_priority__', '__array_wrap__', '__bool__', '__complex__', '__contains__', '__cuda_array_interface__',
     '__deepcopy__', '__delattr__', '__delitem__', '__dict__', '__dir__', '__div__', '__dlpack__', '__dlpack_device__', '__doc__', '__eq__', '__float__', '__floordiv__', '__format__',
@@ -245,6 +247,8 @@ class TorchApiVisitor(ast.NodeVisitor):
                     # 检查最后的属性是否为tensor方法
                     last_attr = chain[-1]
                     if last_attr in TENSOR_METHODS:
+                        if last_attr in AMBIGUOUS_TENSOR_METHODS and not self._is_known_tensor_receiver(node.value):
+                            return None
                         return f"torch.Tensor.{last_attr}"
 
             # 3. 只有在base不是已知非torch模块时，才检查是否为tensor方法
@@ -308,7 +312,7 @@ class TorchApiVisitor(ast.NodeVisitor):
                 for child in ast.walk(node):
                     if (
                         isinstance(child, ast.Attribute) and
-                        child.attr in AMBIGUOUS_TENSOR_METHODS and
+                        child.attr in FUNCTION_PARAM_TENSOR_HINTS and
                         isinstance(child.value, ast.Name) and
                         child.value.id in param_names
                     ):
