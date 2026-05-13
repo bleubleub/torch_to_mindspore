@@ -1,7 +1,14 @@
 import ast
 import os
 import pandas as pd
-from typing import Set, Dict, List, Optional, Any, Tuple
+from typing import Set, Dict, List, Optional, Any
+
+AMBIGUOUS_TENSOR_METHODS = {
+    # Common Python/container/path attributes that are also Tensor APIs.
+    # Only report these when the receiver can be inferred as a Tensor.
+    'data', 'device', 'dtype', 'get', 'items', 'keys', 'name', 'shape',
+    'size', 'type', 'values', 'view'
+}
 
 TENSOR_METHODS = {
     'H', 'T', '__abs__', '__add__', '__and__', '__array__', '__array_priority__', '__array_wrap__', '__bool__', '__complex__', '__contains__', '__cuda_array_interface__',
@@ -62,18 +69,36 @@ def find_torch_imports(content: str) -> Dict[str, str]:
     imports = {}
     try:
         tree = ast.parse(content)
-        for node in ast.walk(tree):
+        import_nodes = [
+            node for node in ast.walk(tree)
+            if isinstance(node, (ast.Import, ast.ImportFrom))
+        ]
+        import_nodes.sort(key=lambda node: (getattr(node, 'lineno', 0), getattr(node, 'col_offset', 0)))
+
+        def remove_alias(alias_name: str):
+            imports.pop(alias_name, None)
+            # `import torch.nn as nn` used to add helper aliases such as `nn.nn`.
+            for key in list(imports):
+                if key.startswith(f"{alias_name}."):
+                    imports.pop(key, None)
+
+        for node in import_nodes:
             if isinstance(node, ast.Import):
                 for name in node.names:
+                    alias = name.asname or name.name
                     if name.name.startswith('torch'):
                         if name.asname:
                             imports[name.asname] = name.name
                             module_name = name.name.split('.')[-1]
                             imports[f"{name.asname}.{module_name}"] = name.name
                         imports[name.name] = name.name
+                    else:
+                        remove_alias(alias)
             elif isinstance(node, ast.ImportFrom):
                 if node.module and node.module.startswith('torch'):
                     for name in node.names:
+                        if name.name == '*':
+                            continue
                         if name.asname:
                             imports[name.asname] = f"{node.module}.{name.name}"
                         else:
@@ -85,6 +110,11 @@ def find_torch_imports(content: str) -> Dict[str, str]:
                             imports[parts[-1]] = f"{node.module}.{name.name}"
                         if node.module == 'torch.nn.functional':
                             imports[name.name] = f"torch.nn.functional.{name.name}"
+                else:
+                    for name in node.names:
+                        if name.name == '*':
+                            continue
+                        remove_alias(name.asname or name.name)
     except SyntaxError:
         pass
     return imports
@@ -96,8 +126,48 @@ class TorchApiVisitor(ast.NodeVisitor):
         self.torch_apis: List[Dict[str, Any]] = []
         # 使用行号+列号+API名称进行精确去重，Tensor方法额外使用节点id
         self.processed_positions: Set[Any] = set()
-        # 为每行每个API维护一个计数器
-        self.api_counters: Dict[Tuple[int, str], int] = {}
+        self.tensor_names: Set[str] = set()
+
+    def _expr_to_name(self, node: ast.AST) -> Optional[str]:
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            parts = []
+            curr = node
+            while isinstance(curr, ast.Attribute):
+                parts.insert(0, curr.attr)
+                curr = curr.value
+            if isinstance(curr, ast.Name):
+                parts.insert(0, curr.id)
+                return ".".join(parts)
+        return None
+
+    def _is_tensor_annotation(self, node: ast.AST) -> bool:
+        api = self._resolve_api_from_node(node)
+        return api == 'torch.Tensor'
+
+    def _is_tensor_factory_api(self, api: Optional[str]) -> bool:
+        if not api or not api.startswith('torch.'):
+            return False
+        if api == 'torch.Tensor':
+            return True
+        if api.startswith(('torch.nn.', 'torch.optim.', 'torch.distributed.', 'torch.utils.')):
+            return False
+        return True
+
+    def _mark_tensor_target(self, target: ast.AST):
+        name = self._expr_to_name(target)
+        if name:
+            self.tensor_names.add(name)
+
+    def _is_known_tensor_receiver(self, receiver: ast.AST) -> bool:
+        name = self._expr_to_name(receiver)
+        if not name:
+            return False
+        if name in self.tensor_names:
+            return True
+        parts = name.split('.')
+        return any(".".join(parts[:idx]) in self.tensor_names for idx in range(1, len(parts) + 1))
 
     def _resolve_api_from_node(self, node: ast.AST) -> Optional[str]:
         """
@@ -119,7 +189,7 @@ class TorchApiVisitor(ast.NodeVisitor):
             
             if not isinstance(curr, ast.Name):
                 # 对于复杂基类（非简单变量名），只有当最终属性是Tensor方法时，才认定为torch.Tensor方法
-                if node.attr in TENSOR_METHODS:
+                if node.attr in TENSOR_METHODS and node.attr not in AMBIGUOUS_TENSOR_METHODS:
                     return f"torch.Tensor.{node.attr}"
                 return None
             
@@ -156,10 +226,36 @@ class TorchApiVisitor(ast.NodeVisitor):
                 # 只有在base不是已知非torch模块时，才检查最后的属性是否为tensor方法
                 last_attr = chain[-1]
                 if last_attr in TENSOR_METHODS:
+                    if last_attr in AMBIGUOUS_TENSOR_METHODS and not self._is_known_tensor_receiver(node.value):
+                        return None
                     result = f"torch.Tensor.{last_attr}"
                     return result
 
         return None
+
+    def visit_FunctionDef(self, node: ast.FunctionDef):
+        for arg in list(node.args.args) + list(node.args.kwonlyargs):
+            if arg.annotation and self._is_tensor_annotation(arg.annotation):
+                self.tensor_names.add(arg.arg)
+        if node.args.vararg and node.args.vararg.annotation and self._is_tensor_annotation(node.args.vararg.annotation):
+            self.tensor_names.add(node.args.vararg.arg)
+        if node.args.kwarg and node.args.kwarg.annotation and self._is_tensor_annotation(node.args.kwarg.annotation):
+            self.tensor_names.add(node.args.kwarg.arg)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign):
+        if node.annotation and self._is_tensor_annotation(node.annotation):
+            self._mark_tensor_target(node.target)
+        elif node.value is not None and self._is_tensor_factory_api(self._resolve_api_from_node(node.value.func) if isinstance(node.value, ast.Call) else None):
+            self._mark_tensor_target(node.target)
+        self.generic_visit(node)
+
+    def visit_Assign(self, node: ast.Assign):
+        api = self._resolve_api_from_node(node.value.func) if isinstance(node.value, ast.Call) else None
+        if self._is_tensor_factory_api(api):
+            for target in node.targets:
+                self._mark_tensor_target(target)
+        self.generic_visit(node)
 
     def add_api(self, api: Optional[str], node: ast.AST):
         # 使用行号+列号+API名称进行精确去重
@@ -240,13 +336,16 @@ def process_file(file_path: str) -> List[dict]:
             api_info['file'] = file_path
         
         return apis
-    except Exception:
+    except Exception as exc:
+        print(f"跳过文件 {file_path}: {exc}")
         return []
 
 def process_directory(directory_path: str) -> List[dict]:
     """处理目录，返回所有文件中的 torch API 使用列表"""
     all_apis = []
-    for root, _, files in os.walk(directory_path):
+    skip_dirs = {'.git', '.hg', '.svn', '__pycache__', '.pytest_cache', '.mypy_cache', 'converted_files'}
+    for root, dirs, files in os.walk(directory_path):
+        dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith('.')]
         for file in files:
             if file.endswith('.py'):
                 file_path = os.path.join(root, file)
@@ -280,19 +379,21 @@ def main():
     print(f"扫描完成，生成的JSON文件已保存到：{json_output_filename}")
 
     # --- 步骤2: 生成供人工核对的 Excel 文件 ---
-    if results:
-        try:
-            df = pd.DataFrame(results)
+    try:
+        df = pd.DataFrame(results)
+        if results:
             # 重命名并排序，方便阅读
             df = df.rename(columns={'file': '文件', 'line': '行号', 'api': '接口'})
             df = df[['文件', '行号', '接口']]
             df = df.sort_values(by=['文件', '行号']).reset_index(drop=True)
-            
-            excel_output_filename = 'api_report_check.xlsx'
-            df.to_excel(excel_output_filename, index=False)
-            print(f"为方便核对，Excel报告已保存到: {excel_output_filename}")
-        except Exception as e:
-            print(f"生成Excel报告时出错: {e}")
+        else:
+            df = pd.DataFrame(columns=['文件', '行号', '接口'])
+
+        excel_output_filename = 'api_report_check.xlsx'
+        df.to_excel(excel_output_filename, index=False)
+        print(f"为方便核对，Excel报告已保存到: {excel_output_filename}")
+    except Exception as e:
+        print(f"生成Excel报告时出错: {e}")
 
     print(f"共找到 {len(results)} 个API调用。")
 
