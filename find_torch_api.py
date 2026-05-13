@@ -159,6 +159,8 @@ class TorchApiVisitor(ast.NodeVisitor):
         name = self._expr_to_name(target)
         if name:
             self.tensor_names.add(name)
+            return True
+        return False
 
     def _mark_named_parameters_targets(self, target: ast.AST):
         if not isinstance(target, (ast.Tuple, ast.List)) or len(target.elts) < 2:
@@ -174,6 +176,13 @@ class TorchApiVisitor(ast.NodeVisitor):
         if not isinstance(node, ast.Attribute) or node.attr != 'data':
             return False
         return self._is_known_tensor_receiver(node.value)
+
+    def _is_tensor_expr(self, node: ast.AST) -> bool:
+        if self._is_tensor_data_expr(node) or self._is_known_tensor_receiver(node):
+            return True
+        if isinstance(node, ast.Call):
+            return self._is_tensor_factory_api(self._resolve_api_from_node(node.func))
+        return False
 
     def _is_known_tensor_receiver(self, receiver: ast.AST) -> bool:
         name = self._expr_to_name(receiver)
@@ -279,6 +288,30 @@ class TorchApiVisitor(ast.NodeVisitor):
             self._mark_named_parameters_targets(node.target)
         self.generic_visit(node)
 
+    def collect_tensor_bindings(self, tree: ast.AST):
+        """Pre-pass: infer Tensor parameters from local call sites before visiting function bodies."""
+        function_params: Dict[str, List[str]] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                params = [arg.arg for arg in node.args.posonlyargs + node.args.args]
+                function_params[node.name] = params
+            elif isinstance(node, ast.For) and self._is_named_parameters_call(node.iter):
+                self._mark_named_parameters_targets(node.target)
+
+        changed = True
+        while changed:
+            changed = False
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+                    continue
+                params = function_params.get(node.func.id)
+                if not params:
+                    continue
+                for arg_node, param_name in zip(node.args, params):
+                    if self._is_tensor_expr(arg_node) and param_name not in self.tensor_names:
+                        self.tensor_names.add(param_name)
+                        changed = True
+
     def add_api(self, api: Optional[str], node: ast.AST):
         # 使用行号+列号+API名称进行精确去重
         if api and hasattr(node, 'lineno') and hasattr(node, 'col_offset'):
@@ -340,6 +373,7 @@ def find_torch_usage(content: str, imports: Dict[str, str]) -> List[dict]:
                 child.parent = node
         
         visitor = TorchApiVisitor(imports)
+        visitor.collect_tensor_bindings(tree)
         visitor.visit(tree)
         return visitor.torch_apis
     except SyntaxError:
