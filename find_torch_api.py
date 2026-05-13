@@ -304,6 +304,15 @@ class TorchApiVisitor(ast.NodeVisitor):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 params = [arg.arg for arg in node.args.posonlyargs + node.args.args]
                 function_params[node.name] = params
+                param_names = set(params)
+                for child in ast.walk(node):
+                    if (
+                        isinstance(child, ast.Attribute) and
+                        child.attr in AMBIGUOUS_TENSOR_METHODS and
+                        isinstance(child.value, ast.Name) and
+                        child.value.id in param_names
+                    ):
+                        self.tensor_names.add(child.value.id)
             elif isinstance(node, ast.For) and self._is_named_parameters_call(node.iter):
                 self._mark_named_parameters_targets(node.target)
             elif isinstance(node, ast.Call):
