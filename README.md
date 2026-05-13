@@ -54,7 +54,17 @@ python convert_to_mindspore.py
 ## 依赖包
 
 ```bash
-pip install libcst pandas openpyxl
+pip install libcst pandas openpyxl pyright
+```
+
+`find_torch_api.py` 默认使用 Pyright 做类型辅助识别，以减少 `numpy.reshape`、`Enum.name` 等非 PyTorch 对象被误识别为 `torch.Tensor.*` 的情况。安装 `pyright` 后会提供 `pyright` 和 `pyright-langserver` 命令；如果未安装，脚本会自动回退到启发式扫描。
+
+常用扫描命令：
+
+```bash
+python find_torch_api.py files_to_be_converted --mode pyright
+python find_torch_api.py files_to_be_converted --mode heuristic
+python find_torch_api.py files_to_be_converted --mode both
 ```
 
 ### 仅根据 Torch API 表生成映射结果
