@@ -153,6 +153,8 @@ class TorchApiVisitor(ast.NodeVisitor):
             return False
         if api == 'torch.Tensor':
             return True
+        if api.startswith('torch.nn.functional.'):
+            return True
         if api.startswith(('torch.nn.', 'torch.optim.', 'torch.distributed.', 'torch.utils.')):
             return False
         return True
