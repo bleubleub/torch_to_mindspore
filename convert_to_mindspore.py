@@ -59,6 +59,7 @@ class APIConversionTransformer(cst.CSTTransformer):
         self.full_mapping_info = full_mapping_info
         self.modified = False
         self.processed_apis = []
+        self.class_module_stack = []
         
         # 将API按(行号, 列号)组织，以便更精确匹配
         self.apis_by_position = {}
@@ -342,16 +343,8 @@ class APIConversionTransformer(cst.CSTTransformer):
         except Exception:
             pass
         
-        # 检查该位置的API，如果是函数调用相关的，跳过处理
-        position_key = (lineno, col_offset)
-        if position_key in self.apis_by_position:
-            for api_info in self.apis_by_position[position_key]:
-                torch_api = api_info['api']
-                # 如果是函数调用类型的API，跳过处理，让leave_Call处理
-                if any(keyword in torch_api for keyword in ['functional', 'nn.', 'ops.']):
-                    return updated_node
-        
         # 进行精确位置匹配（行号+列号）
+        position_key = (lineno, col_offset)
         if position_key in self.apis_by_position:
             for api_info in self.apis_by_position[position_key][:]:
                 # 检查这个API是否已经被处理过了（比如在leave_Call中）
@@ -377,6 +370,9 @@ class APIConversionTransformer(cst.CSTTransformer):
         return updated_node
 
     def leave_ClassDef(self, original_node: cst.ClassDef, updated_node: cst.ClassDef) -> cst.CSTNode:
+        if self.class_module_stack:
+            self.class_module_stack.pop()
+
         new_bases = list(updated_node.bases)
         bases_modified = False
         class_name = original_node.name.value
@@ -412,12 +408,27 @@ class APIConversionTransformer(cst.CSTTransformer):
         return updated_node
 
     def leave_FunctionDef(self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef) -> cst.CSTNode:
-        """处理方法定义，将所有forward方法改为construct方法"""
-        if original_node.name.value == "forward":
+        """处理torch.nn.Module子类方法定义，将forward方法改为construct方法"""
+        if original_node.name.value == "forward" and any(self.class_module_stack):
             self.modified = True
             return updated_node.with_changes(name=cst.Name("construct"))
         
         return updated_node
+
+    def visit_ClassDef(self, node: cst.ClassDef) -> None:
+        is_torch_module = False
+        for base in node.bases:
+            try:
+                pos = self.get_metadata(cst.metadata.PositionProvider, base.value)
+                for api_info in self.apis_by_line.get(pos.start.line, []):
+                    if api_info['api'] == 'torch.nn.Module' and self._func_matches_api(base.value, api_info['api']):
+                        is_torch_module = True
+                        break
+            except Exception:
+                continue
+            if is_torch_module:
+                break
+        self.class_module_stack.append(is_torch_module)
 
     def _process_api_conversion(self, torch_api: str, lineno: int, naive_name: str = "") -> Dict[str, Any]:
         """处理API转换的通用方法"""
@@ -782,8 +793,13 @@ class ImportTransformer(cst.CSTTransformer):
         insert_idx = 0
         found_non_import = False
         for i, stmt in enumerate(updated_node.body):
-            is_import = isinstance(stmt, cst.SimpleStatementLine) and isinstance(stmt.body[0], (cst.Import, cst.ImportFrom))
-            is_docstring = (i == 0 and isinstance(stmt.body[0], cst.Expr) and isinstance(stmt.body[0].value, cst.SimpleString))
+            is_simple = isinstance(stmt, cst.SimpleStatementLine)
+            is_import = is_simple and isinstance(stmt.body[0], (cst.Import, cst.ImportFrom))
+            is_docstring = (
+                i == 0 and is_simple and
+                isinstance(stmt.body[0], cst.Expr) and
+                isinstance(stmt.body[0].value, cst.SimpleString)
+            )
 
             if not is_import and not is_docstring:
                  insert_idx = i
