@@ -10,6 +10,8 @@ AMBIGUOUS_TENSOR_METHODS = {
     'size', 'type', 'values', 'view'
 }
 
+TENSOR_CONTEXT_ATTRS = {'shape', 'dtype', 'device'}
+
 TENSOR_METHODS = {
     'H', 'T', '__abs__', '__add__', '__and__', '__array__', '__array_priority__', '__array_wrap__', '__bool__', '__complex__', '__contains__', '__cuda_array_interface__',
     '__deepcopy__', '__delattr__', '__delitem__', '__dict__', '__dir__', '__div__', '__dlpack__', '__dlpack_device__', '__doc__', '__eq__', '__float__', '__floordiv__', '__format__',
@@ -184,6 +186,11 @@ class TorchApiVisitor(ast.NodeVisitor):
             return self._is_tensor_factory_api(self._resolve_api_from_node(node.func))
         return False
 
+    def _mark_tensor_context_receivers(self, node: ast.AST):
+        for child in ast.walk(node):
+            if isinstance(child, ast.Attribute) and child.attr in TENSOR_CONTEXT_ATTRS:
+                self._mark_tensor_target(child.value)
+
     def _is_known_tensor_receiver(self, receiver: ast.AST) -> bool:
         name = self._expr_to_name(receiver)
         if not name:
@@ -297,6 +304,14 @@ class TorchApiVisitor(ast.NodeVisitor):
                 function_params[node.name] = params
             elif isinstance(node, ast.For) and self._is_named_parameters_call(node.iter):
                 self._mark_named_parameters_targets(node.target)
+            elif isinstance(node, ast.Call):
+                api = self._resolve_api_from_node(node.func)
+                if api and api.startswith('torch.'):
+                    for arg in node.args:
+                        self._mark_tensor_context_receivers(arg)
+                    for keyword in node.keywords:
+                        if keyword.value is not None:
+                            self._mark_tensor_context_receivers(keyword.value)
 
         changed = True
         while changed:
