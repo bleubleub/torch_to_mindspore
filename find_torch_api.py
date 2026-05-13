@@ -160,6 +160,21 @@ class TorchApiVisitor(ast.NodeVisitor):
         if name:
             self.tensor_names.add(name)
 
+    def _mark_named_parameters_targets(self, target: ast.AST):
+        if not isinstance(target, (ast.Tuple, ast.List)) or len(target.elts) < 2:
+            return
+        self._mark_tensor_target(target.elts[-1])
+
+    def _is_named_parameters_call(self, node: ast.AST) -> bool:
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            return False
+        return node.func.attr == 'named_parameters'
+
+    def _is_tensor_data_expr(self, node: ast.AST) -> bool:
+        if not isinstance(node, ast.Attribute) or node.attr != 'data':
+            return False
+        return self._is_known_tensor_receiver(node.value)
+
     def _is_known_tensor_receiver(self, receiver: ast.AST) -> bool:
         name = self._expr_to_name(receiver)
         if not name:
@@ -248,13 +263,20 @@ class TorchApiVisitor(ast.NodeVisitor):
             self._mark_tensor_target(node.target)
         elif node.value is not None and self._is_tensor_factory_api(self._resolve_api_from_node(node.value.func) if isinstance(node.value, ast.Call) else None):
             self._mark_tensor_target(node.target)
+        elif node.value is not None and self._is_tensor_data_expr(node.value):
+            self._mark_tensor_target(node.target)
         self.generic_visit(node)
 
     def visit_Assign(self, node: ast.Assign):
         api = self._resolve_api_from_node(node.value.func) if isinstance(node.value, ast.Call) else None
-        if self._is_tensor_factory_api(api):
+        if self._is_tensor_factory_api(api) or self._is_tensor_data_expr(node.value):
             for target in node.targets:
                 self._mark_tensor_target(target)
+        self.generic_visit(node)
+
+    def visit_For(self, node: ast.For):
+        if self._is_named_parameters_call(node.iter):
+            self._mark_named_parameters_targets(node.target)
         self.generic_visit(node)
 
     def add_api(self, api: Optional[str], node: ast.AST):
