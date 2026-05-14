@@ -57,6 +57,25 @@ python convert_to_mindspore.py
 pip install libcst pandas openpyxl
 ```
 
+### 仅根据 Torch API 表生成映射结果
+
+如果已有一个只包含 `接口` 列的 Torch API 表格，可以直接追加 MindSpore 映射信息：
+
+```bash
+python map_api_table.py torch_api_list.xlsx
+```
+
+默认会直接写回原表，并追加三列：
+
+| 接口 | 可替换MindSpore接口 | 其他替换方案 | 备注 |
+|------|---------------------|--------------|------|
+
+如需保留原表，也可以指定输出路径另存：
+
+```bash
+python map_api_table.py torch_api_list.xlsx -o output.xlsx
+```
+
 ## 注意事项
 
 当前该工具仅支持API接口级别的转换
