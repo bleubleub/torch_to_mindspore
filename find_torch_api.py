@@ -17,6 +17,11 @@ SCAN_COLUMNS = ["文件", "行号", "接口", "置信度", "类型来源", "推�
 DEFAULT_MAPPING_FILE = "torch_to_mindspore_mapping.xlsx"
 PYRIGHT_REQUEST_TIMEOUT_SECONDS = 10.0
 _LAST_PROGRESS_LEN = 0
+TENSOR_SOURCE_METHODS = {"full_tensor", "to_local"}
+TENSOR_CHAIN_METHODS = {"cpu", "cuda", "detach", "float", "half", "to"} | TENSOR_SOURCE_METHODS
+TENSOR_RETURNING_PROPERTIES = {"data", "grad"}
+NON_TENSOR_RETURNING_PROPERTIES = {"device", "dtype", "itemsize", "ndim", "shape"}
+NON_TENSOR_RETURNING_METHODS = {"item", "size", "tolist", "numpy"}
 FALLBACK_TENSOR_METHODS = {
     "contiguous", "data", "device", "dtype", "reshape", "shape", "size", "view",
     "abs", "clone", "detach", "flatten", "permute", "squeeze", "transpose", "unsqueeze",
@@ -102,6 +107,200 @@ def _node_hover_position(node: ast.AST) -> Tuple[int, int]:
     if col is None:
         col = getattr(node, "col_offset", 0)
     return line, max(col - 1, getattr(node, "col_offset", 0))
+
+
+def _node_hover_positions(node: ast.AST) -> List[Tuple[int, int]]:
+    positions: List[Tuple[int, int]] = []
+
+    def add(pos: Tuple[int, int]):
+        if pos not in positions:
+            positions.append(pos)
+
+    if hasattr(node, "lineno"):
+        line = max(getattr(node, "lineno", 1) - 1, 0)
+        add((line, getattr(node, "col_offset", 0)))
+        add(_node_hover_position(node))
+
+    # Pyright often does not return hover info on the closing bracket in
+    # expressions like `a[0].item()`. Query the base expression as a fallback.
+    if isinstance(node, ast.Subscript):
+        for pos in _node_hover_positions(node.value):
+            add(pos)
+    elif isinstance(node, ast.Attribute):
+        for pos in _node_hover_positions(node.value):
+            add(pos)
+    return positions
+
+
+def _tensor_chain_source(
+    node: ast.AST,
+    tensor_methods: Set[str],
+    tensor_vars: Optional[Set[str]] = None,
+) -> Optional[str]:
+    tensor_vars = tensor_vars or set()
+    if isinstance(node, ast.Name):
+        return "variable" if node.id in tensor_vars else None
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        method = node.func.attr
+        if method in TENSOR_SOURCE_METHODS:
+            return method
+        if method in NON_TENSOR_RETURNING_METHODS:
+            return None
+        if method in tensor_methods or method in TENSOR_CHAIN_METHODS:
+            return method if _tensor_chain_source(node.func.value, tensor_methods, tensor_vars) else None
+    if isinstance(node, ast.Attribute):
+        attr = node.attr
+        if attr in TENSOR_RETURNING_PROPERTIES:
+            return attr
+        if attr in NON_TENSOR_RETURNING_PROPERTIES:
+            return None
+        if attr in tensor_methods or attr in TENSOR_CHAIN_METHODS:
+            return attr if _tensor_chain_source(node.value, tensor_methods, tensor_vars) else None
+    if isinstance(node, ast.Subscript):
+        return _tensor_chain_source(node.value, tensor_methods, tensor_vars)
+    return None
+
+
+def _tensor_like_expr_source(node: ast.AST, tensor_methods: Set[str], tensor_vars: Set[str]) -> Optional[str]:
+    if isinstance(node, ast.Name):
+        return "variable" if node.id in tensor_vars else None
+    if isinstance(node, ast.Call):
+        if isinstance(node.func, ast.Attribute):
+            method = node.func.attr
+            if method in TENSOR_SOURCE_METHODS:
+                return method
+            if method in NON_TENSOR_RETURNING_METHODS:
+                return None
+            if method in tensor_methods or method in TENSOR_CHAIN_METHODS:
+                return method if _tensor_like_expr_source(node.func.value, tensor_methods, tensor_vars) else None
+        name = _expr_to_name(node.func)
+        if name and name.startswith("torch."):
+            return name
+    if isinstance(node, ast.Attribute):
+        if node.attr in NON_TENSOR_RETURNING_PROPERTIES:
+            return None
+        if node.attr in TENSOR_RETURNING_PROPERTIES:
+            return node.attr
+        return _tensor_chain_source(node, tensor_methods, tensor_vars)
+    if isinstance(node, ast.Subscript):
+        return _tensor_like_expr_source(node.value, tensor_methods, tensor_vars)
+    return None
+
+
+def _is_tensor_like_argument(node: ast.AST, tensor_methods: Set[str]) -> bool:
+    return _tensor_like_expr_source(node, tensor_methods, set()) is not None
+
+
+def _iter_call_name(node: ast.AST) -> Optional[str]:
+    if isinstance(node, ast.Call):
+        return _expr_to_name(node.func)
+    return None
+
+
+def _for_body_range(node: ast.For) -> Tuple[int, int]:
+    start = node.body[0].lineno if node.body else node.lineno
+    end = getattr(node, "end_lineno", None) or max(
+        getattr(child, "lineno", start) for child in ast.walk(node)
+    )
+    return start, end
+
+
+def infer_tensor_loop_ranges(tree: ast.AST) -> Dict[str, List[Tuple[int, int]]]:
+    ranges: Dict[str, List[Tuple[int, int]]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.For):
+            continue
+        iter_name = _iter_call_name(node.iter)
+        if not iter_name:
+            continue
+
+        tensor_targets: List[ast.AST] = []
+        if iter_name.endswith(".named_parameters") or iter_name.endswith(".named_buffers"):
+            if isinstance(node.target, (ast.Tuple, ast.List)) and len(node.target.elts) >= 2:
+                tensor_targets.append(node.target.elts[1])
+        elif iter_name.endswith(".parameters") or iter_name.endswith(".buffers"):
+            tensor_targets.append(node.target)
+
+        start, end = _for_body_range(node)
+        for target in tensor_targets:
+            if isinstance(target, ast.Name):
+                ranges.setdefault(target.id, []).append((start, end))
+    return ranges
+
+
+def infer_tensor_variable_ranges(tree: ast.AST, tensor_methods: Set[str]) -> Dict[str, List[Tuple[int, int]]]:
+    tensor_vars: Set[str] = set()
+    active_start: Dict[str, int] = {}
+    loop_ranges = infer_tensor_loop_ranges(tree)
+    ranges: Dict[str, List[Tuple[int, int]]] = {name: list(items) for name, items in loop_ranges.items()}
+    assignments = [
+        node for node in ast.walk(tree)
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and hasattr(node, "lineno")
+    ]
+    assignments.sort(key=lambda node: (node.lineno, getattr(node, "col_offset", 0)))
+
+    for node in assignments:
+        value = node.value
+        if value is None:
+            continue
+        line_tensor_vars = set(tensor_vars)
+        line_tensor_vars.update(
+            name for name in loop_ranges
+            if _is_tensor_variable_at(name, node.lineno, loop_ranges)
+        )
+        source = _tensor_like_expr_source(value, tensor_methods, line_tensor_vars)
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        for target in targets:
+            if isinstance(target, ast.Name):
+                if target.id in active_start:
+                    ranges.setdefault(target.id, []).append((active_start.pop(target.id), node.lineno))
+                if source:
+                    tensor_vars.add(target.id)
+                    active_start[target.id] = node.lineno
+                else:
+                    tensor_vars.discard(target.id)
+    for name, start in active_start.items():
+        ranges.setdefault(name, []).append((start, 10**9))
+    return ranges
+
+
+def _is_tensor_variable_at(name: str, line: int, ranges: Dict[str, List[Tuple[int, int]]]) -> bool:
+    return any(start <= line <= end for start, end in ranges.get(name, []))
+
+
+def _receiver_tensor_variable_source(
+    node: ast.AST,
+    line: int,
+    ranges: Dict[str, List[Tuple[int, int]]],
+) -> Optional[str]:
+    if isinstance(node, ast.Name) and _is_tensor_variable_at(node.id, line, ranges):
+        return node.id
+    if isinstance(node, ast.Subscript):
+        return _receiver_tensor_variable_source(node.value, line, ranges)
+    return None
+
+
+def infer_tensor_function_params(tree: ast.AST, tensor_methods: Set[str]) -> Set[Tuple[str, str]]:
+    function_params: Dict[str, List[str]] = {}
+    tensor_params: Set[Tuple[str, str]] = set()
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef):
+            function_params[node.name] = [arg.arg for arg in node.args.args]
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        params = function_params.get(node.func.id)
+        if not params:
+            continue
+        for index, arg in enumerate(node.args):
+            if index < len(params) and _is_tensor_like_argument(arg, tensor_methods):
+                tensor_params.add((node.func.id, params[index]))
+        for keyword in node.keywords:
+            if keyword.arg in params and _is_tensor_like_argument(keyword.value, tensor_methods):
+                tensor_params.add((node.func.id, keyword.arg))
+    return tensor_params
 
 
 def _hover_text(contents: Any) -> str:
@@ -241,9 +440,18 @@ class PyrightLspClient:
 
 
 class CandidateVisitor(ast.NodeVisitor):
-    def __init__(self, imports: Dict[str, str], tensor_methods: Set[str]):
+    def __init__(
+        self,
+        imports: Dict[str, str],
+        tensor_methods: Set[str],
+        tensor_params: Set[Tuple[str, str]],
+        tensor_var_ranges: Dict[str, List[Tuple[int, int]]],
+    ):
         self.imports = imports
         self.tensor_methods = tensor_methods
+        self.tensor_params = tensor_params
+        self.tensor_var_ranges = tensor_var_ranges
+        self.function_stack: List[str] = []
         self.candidates: List[Dict[str, Any]] = []
         self.seen: Set[Tuple[int, int, str]] = set()
 
@@ -266,8 +474,23 @@ class CandidateVisitor(ast.NodeVisitor):
             return
         item = {"api": api, "line": node.lineno, "col_offset": node.col_offset}
         if receiver is not None:
-            line, col = _node_hover_position(receiver)
-            item.update({"needs_type": True, "receiver_line": line, "receiver_col": col})
+            positions = _node_hover_positions(receiver)
+            line, col = positions[0]
+            tensor_chain_source = _tensor_chain_source(receiver, self.tensor_methods)
+            item.update({
+                "needs_type": True,
+                "receiver_line": line,
+                "receiver_col": col,
+                "receiver_positions": positions,
+            })
+            if tensor_chain_source:
+                item["tensor_chain_source"] = tensor_chain_source
+            if isinstance(receiver, ast.Name) and self.function_stack:
+                if (self.function_stack[-1], receiver.id) in self.tensor_params:
+                    item["tensor_param_source"] = receiver.id
+            tensor_variable_source = _receiver_tensor_variable_source(receiver, node.lineno, self.tensor_var_ranges)
+            if tensor_variable_source:
+                item["tensor_variable_source"] = tensor_variable_source
         else:
             item["needs_type"] = False
         self.candidates.append(item)
@@ -296,6 +519,11 @@ class CandidateVisitor(ast.NodeVisitor):
             self._add(f"torch.Tensor.{node.attr}", node, node.value)
         self.generic_visit(node)
 
+    def visit_FunctionDef(self, node: ast.FunctionDef):
+        self.function_stack.append(node.name)
+        self.generic_visit(node)
+        self.function_stack.pop()
+
     def visit_ClassDef(self, node: ast.ClassDef):
         for base in node.bases:
             imported = self._resolve_imported(base)
@@ -312,7 +540,9 @@ def collect_candidates(content: str, imports: Dict[str, str], tensor_methods: Se
     for node in ast.walk(tree):
         for child in ast.iter_child_nodes(node):
             child.parent = node
-    visitor = CandidateVisitor(imports, tensor_methods)
+    tensor_params = infer_tensor_function_params(tree, tensor_methods)
+    tensor_var_ranges = infer_tensor_variable_ranges(tree, tensor_methods)
+    visitor = CandidateVisitor(imports, tensor_methods, tensor_params, tensor_var_ranges)
     visitor.visit(tree)
     return visitor.candidates
 
@@ -353,11 +583,38 @@ def find_torch_usage(
         if not item.get("needs_type"):
             results.append({**item, "confidence": "confirmed", "type_source": "static", "inferred_type": ""})
             continue
+        if item.get("tensor_chain_source"):
+            results.append({
+                **item,
+                "confidence": "confirmed",
+                "type_source": "tensor_chain",
+                "inferred_type": f"receiver from Tensor method chain: {item['tensor_chain_source']}",
+            })
+            continue
+        if item.get("tensor_param_source"):
+            results.append({
+                **item,
+                "confidence": "confirmed",
+                "type_source": "tensor_param",
+                "inferred_type": f"function parameter inferred from Tensor argument: {item['tensor_param_source']}",
+            })
+            continue
+        if item.get("tensor_variable_source"):
+            results.append({
+                **item,
+                "confidence": "confirmed",
+                "type_source": "tensor_variable",
+                "inferred_type": f"variable inferred from Tensor assignment: {item['tensor_variable_source']}",
+            })
+            continue
         if mode == "static" or not file_path or not resolver or not resolver.available:
             continue
         inferred = ""
         try:
-            inferred = resolver.hover(file_path, item["receiver_line"], item["receiver_col"])
+            for line, col in item.get("receiver_positions") or [(item["receiver_line"], item["receiver_col"])]:
+                inferred = resolver.hover(file_path, line, col)
+                if _is_torch_tensor_type(inferred):
+                    break
         except TimeoutError:
             raise
         except Exception:
@@ -372,6 +629,31 @@ def _progress_bar(index: int, total: int, width: int = 24) -> str:
         return "[" + "-" * width + "]"
     filled = round(width * index / total)
     return "[" + "#" * filled + "-" * (width - filled) + "]"
+
+
+def _truncate_middle(text: str, max_len: int) -> str:
+    if len(text) <= max_len:
+        return text
+    if max_len <= 3:
+        return text[:max_len]
+    left = max_len // 2 - 1
+    right = max_len - left - 3
+    return f"{text[:left]}...{text[-right:]}"
+
+
+def _format_progress(
+    index: int,
+    total_files: int,
+    rel_path: str,
+    elapsed: float,
+    api_count: int,
+) -> str:
+    percent = index * 100 / total_files if total_files else 100.0
+    prefix = f"{_progress_bar(index, total_files)} {percent:5.1f}% ({index}/{total_files}) file="
+    suffix = f" elapsed={elapsed:.1f}s apis={api_count}"
+    columns = max(shutil.get_terminal_size((100, 20)).columns, 40)
+    max_path_len = max(columns - len(prefix) - len(suffix) - 1, 12)
+    return f"{prefix}{_truncate_middle(rel_path, max_path_len)}{suffix}"
 
 
 def _public_api_item(item: Dict[str, Any], file_path: str) -> Dict[str, Any]:
@@ -404,15 +686,16 @@ def process_file(
 
 def _print_progress(message: str):
     global _LAST_PROGRESS_LEN
-    padding = " " * max(_LAST_PROGRESS_LEN - len(message), 0)
-    print(f"\r{message}{padding}", end="", flush=True)
+    columns = max(shutil.get_terminal_size((100, 20)).columns, 40)
+    message = _truncate_middle(message, columns - 1)
+    print(f"\r\033[2K{message}", end="", flush=True)
     _LAST_PROGRESS_LEN = len(message)
 
 
 def _clear_progress_line():
     global _LAST_PROGRESS_LEN
     if _LAST_PROGRESS_LEN:
-        print("\r" + " " * _LAST_PROGRESS_LEN + "\r", end="", flush=True)
+        print("\r\033[2K", end="", flush=True)
         _LAST_PROGRESS_LEN = 0
 
 
@@ -437,20 +720,12 @@ def process_directory(
     for index, file_path in enumerate(python_files, start=1):
         rel_path = os.path.relpath(file_path, directory_path)
         elapsed = time.monotonic() - start_time
-        percent = index * 100 / total_files if total_files else 100.0
-        _print_progress(
-            f"{_progress_bar(index, total_files)} {percent:5.1f}% "
-            f"({index}/{total_files}) 扫描 {rel_path}，已耗时 {elapsed:.1f}s，已发现 {len(all_apis)} 个API"
-        )
-        file_start = time.monotonic()
+        _print_progress(_format_progress(index, total_files, rel_path, elapsed, len(all_apis)))
         file_apis, skip_reason = process_file(file_path, mode, resolver, tensor_methods)
         all_apis.extend(file_apis)
         if skip_reason:
             _clear_progress_line()
             print(f"跳过文件 {rel_path}: {skip_reason}", flush=True)
-        elif file_apis:
-            _clear_progress_line()
-            print(f"完成 {rel_path}，本文件 {len(file_apis)} 个API，耗时 {time.monotonic() - file_start:.1f}s", flush=True)
     if total_files:
         _clear_progress_line()
     return all_apis
