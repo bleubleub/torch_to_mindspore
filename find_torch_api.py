@@ -4,7 +4,6 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 import threading
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -17,6 +16,7 @@ import pandas as pd
 SCAN_COLUMNS = ["文件", "行号", "接口", "置信度", "类型来源", "推断类型"]
 DEFAULT_MAPPING_FILE = "torch_to_mindspore_mapping.xlsx"
 PYRIGHT_REQUEST_TIMEOUT_SECONDS = 10.0
+_LAST_PROGRESS_LEN = 0
 FALLBACK_TENSOR_METHODS = {
     "contiguous", "data", "device", "dtype", "reshape", "shape", "size", "view",
     "abs", "clone", "detach", "flatten", "permute", "squeeze", "transpose", "unsqueeze",
@@ -403,15 +403,17 @@ def process_file(
 
 
 def _print_progress(message: str):
-    if sys.stdout.isatty():
-        print(f"\r{message}", end="", flush=True)
-    else:
-        print(message, flush=True)
+    global _LAST_PROGRESS_LEN
+    padding = " " * max(_LAST_PROGRESS_LEN - len(message), 0)
+    print(f"\r{message}{padding}", end="", flush=True)
+    _LAST_PROGRESS_LEN = len(message)
 
 
 def _clear_progress_line():
-    if sys.stdout.isatty():
-        print("\r" + " " * 120 + "\r", end="", flush=True)
+    global _LAST_PROGRESS_LEN
+    if _LAST_PROGRESS_LEN:
+        print("\r" + " " * _LAST_PROGRESS_LEN + "\r", end="", flush=True)
+        _LAST_PROGRESS_LEN = 0
 
 
 def process_directory(
