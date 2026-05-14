@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -390,16 +391,27 @@ def process_file(
     mode: str = "pyright",
     resolver: Optional[PyrightLspClient] = None,
     tensor_methods: Optional[Set[str]] = None,
-) -> List[dict]:
+) -> Tuple[List[dict], Optional[str]]:
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             content = f.read()
         imports = find_torch_imports(content)
         apis = find_torch_usage(content, imports, file_path, resolver, mode, tensor_methods)
-        return [_public_api_item(api_info, file_path) for api_info in apis]
+        return [_public_api_item(api_info, file_path) for api_info in apis], None
     except Exception as exc:
-        print(f"跳过文件 {file_path}: {exc}")
-        return []
+        return [], str(exc)
+
+
+def _print_progress(message: str):
+    if sys.stdout.isatty():
+        print(f"\r{message}", end="", flush=True)
+    else:
+        print(message, flush=True)
+
+
+def _clear_progress_line():
+    if sys.stdout.isatty():
+        print("\r" + " " * 120 + "\r", end="", flush=True)
 
 
 def process_directory(
@@ -424,18 +436,21 @@ def process_directory(
         rel_path = os.path.relpath(file_path, directory_path)
         elapsed = time.monotonic() - start_time
         percent = index * 100 / total_files if total_files else 100.0
-        print(
+        _print_progress(
             f"{_progress_bar(index, total_files)} {percent:5.1f}% "
-            f"({index}/{total_files}) 扫描 {rel_path}，已耗时 {elapsed:.1f}s，已发现 {len(all_apis)} 个API",
-            flush=True,
+            f"({index}/{total_files}) 扫描 {rel_path}，已耗时 {elapsed:.1f}s，已发现 {len(all_apis)} 个API"
         )
         file_start = time.monotonic()
-        file_apis = process_file(file_path, mode, resolver, tensor_methods)
+        file_apis, skip_reason = process_file(file_path, mode, resolver, tensor_methods)
         all_apis.extend(file_apis)
-        print(
-            f"    完成 {rel_path}，本文件 {len(file_apis)} 个API，耗时 {time.monotonic() - file_start:.1f}s",
-            flush=True,
-        )
+        if skip_reason:
+            _clear_progress_line()
+            print(f"跳过文件 {rel_path}: {skip_reason}", flush=True)
+        elif file_apis:
+            _clear_progress_line()
+            print(f"完成 {rel_path}，本文件 {len(file_apis)} 个API，耗时 {time.monotonic() - file_start:.1f}s", flush=True)
+    if total_files:
+        _clear_progress_line()
     return all_apis
 
 
@@ -459,7 +474,9 @@ def main():
     try:
         tensor_methods = load_tensor_methods()
         if os.path.isfile(args.target_path):
-            results = process_file(args.target_path, args.mode, resolver, tensor_methods)
+            results, skip_reason = process_file(args.target_path, args.mode, resolver, tensor_methods)
+            if skip_reason:
+                print(f"跳过文件 {args.target_path}: {skip_reason}")
         else:
             results = process_directory(args.target_path, args.mode, resolver, tensor_methods)
     finally:
