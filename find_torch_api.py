@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urljoin
@@ -14,6 +15,7 @@ import pandas as pd
 
 SCAN_COLUMNS = ["文件", "行号", "接口", "置信度", "类型来源", "推断类型"]
 DEFAULT_MAPPING_FILE = "torch_to_mindspore_mapping.xlsx"
+PYRIGHT_REQUEST_TIMEOUT_SECONDS = 10.0
 FALLBACK_TENSOR_METHODS = {
     "contiguous", "data", "device", "dtype", "reshape", "shape", "size", "view",
     "abs", "clone", "detach", "flatten", "permute", "squeeze", "transpose", "unsqueeze",
@@ -122,6 +124,9 @@ class PyrightLspClient:
         self.available = bool(command)
         self.proc = None
         self.next_id = 1
+        self._condition = threading.Condition()
+        self._responses: Dict[int, Dict[str, Any]] = {}
+        self._reader_error: Optional[Exception] = None
         if not command:
             return
         self.proc = subprocess.Popen(
@@ -131,12 +136,21 @@ class PyrightLspClient:
             stderr=subprocess.DEVNULL,
             text=False,
         )
-        self._request("initialize", {
-            "processId": os.getpid(),
-            "rootUri": _file_uri(root_path),
-            "capabilities": {},
-        })
-        self._notify("initialized", {})
+        self._reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
+        self._reader_thread.start()
+        try:
+            self._request("initialize", {
+                "processId": os.getpid(),
+                "rootUri": _file_uri(root_path),
+                "capabilities": {},
+            })
+            self._notify("initialized", {})
+        except Exception:
+            self.available = False
+            try:
+                self.proc.terminate()
+            except Exception:
+                pass
 
     def close(self):
         if not self.proc:
@@ -169,16 +183,40 @@ class PyrightLspClient:
             headers[key.lower()] = value.strip()
         return json.loads(self.proc.stdout.read(int(headers["content-length"])).decode("utf-8"))
 
-    def _request(self, method: str, params: Dict[str, Any]) -> Any:
+    def _reader_loop(self):
+        while self.proc and self.proc.poll() is None:
+            try:
+                msg = self._read_message()
+            except Exception as exc:
+                with self._condition:
+                    self._reader_error = exc
+                    self._condition.notify_all()
+                return
+            msg_id = msg.get("id")
+            if msg_id is None:
+                continue
+            with self._condition:
+                self._responses[msg_id] = msg
+                self._condition.notify_all()
+
+    def _request(self, method: str, params: Dict[str, Any], timeout: float = PYRIGHT_REQUEST_TIMEOUT_SECONDS) -> Any:
         req_id = self.next_id
         self.next_id += 1
         self._send({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params})
-        while True:
-            msg = self._read_message()
-            if msg.get("id") == req_id:
-                if "error" in msg:
-                    raise RuntimeError(msg["error"])
-                return msg.get("result")
+        deadline = time.monotonic() + timeout
+        with self._condition:
+            while req_id not in self._responses:
+                if self._reader_error is not None:
+                    raise RuntimeError(self._reader_error)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self.available = False
+                    raise TimeoutError(f"pyright request '{method}' timed out after {timeout:.0f}s")
+                self._condition.wait(remaining)
+            msg = self._responses.pop(req_id)
+        if "error" in msg:
+            raise RuntimeError(msg["error"])
+        return msg.get("result")
 
     def _notify(self, method: str, params: Dict[str, Any]):
         self._send({"jsonrpc": "2.0", "method": method, "params": params})
@@ -319,11 +357,20 @@ def find_torch_usage(
         inferred = ""
         try:
             inferred = resolver.hover(file_path, item["receiver_line"], item["receiver_col"])
+        except TimeoutError:
+            raise
         except Exception:
             pass
         if _is_torch_tensor_type(inferred):
             results.append({**item, "confidence": "confirmed", "type_source": "pyright", "inferred_type": inferred})
     return results
+
+
+def _progress_bar(index: int, total: int, width: int = 24) -> str:
+    if total <= 0:
+        return "[" + "-" * width + "]"
+    filled = round(width * index / total)
+    return "[" + "#" * filled + "-" * (width - filled) + "]"
 
 
 def _public_api_item(item: Dict[str, Any], file_path: str) -> Dict[str, Any]:
@@ -376,8 +423,19 @@ def process_directory(
     for index, file_path in enumerate(python_files, start=1):
         rel_path = os.path.relpath(file_path, directory_path)
         elapsed = time.monotonic() - start_time
-        print(f"[{index}/{total_files}] 扫描 {rel_path}，已耗时 {elapsed:.1f}s，已发现 {len(all_apis)} 个API", flush=True)
-        all_apis.extend(process_file(file_path, mode, resolver, tensor_methods))
+        percent = index * 100 / total_files if total_files else 100.0
+        print(
+            f"{_progress_bar(index, total_files)} {percent:5.1f}% "
+            f"({index}/{total_files}) 扫描 {rel_path}，已耗时 {elapsed:.1f}s，已发现 {len(all_apis)} 个API",
+            flush=True,
+        )
+        file_start = time.monotonic()
+        file_apis = process_file(file_path, mode, resolver, tensor_methods)
+        all_apis.extend(file_apis)
+        print(
+            f"    完成 {rel_path}，本文件 {len(file_apis)} 个API，耗时 {time.monotonic() - file_start:.1f}s",
+            flush=True,
+        )
     return all_apis
 
 
