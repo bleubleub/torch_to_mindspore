@@ -98,6 +98,80 @@ shape = full_tensor.shape
             "torch.Tensor.shape",
         )
 
+    def test_huggingface_training_step_tensor_chains(self):
+        self.assert_detects(
+            """
+import torch
+import torch.nn.functional as F
+
+def train_step(batch, device, vocab_size):
+    input_ids = torch.tensor(batch["input_ids"]).to(device)
+    attention_mask = torch.ones_like(input_ids).float()
+    labels = torch.tensor(batch["labels"]).view(-1)
+    logits = torch.randn(input_ids.size(0), input_ids.size(1), vocab_size)
+    loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels)
+    loss.backward()
+    return loss.item()
+""",
+            "torch.tensor",
+            "torch.ones_like",
+            "torch.randn",
+            "torch.nn.functional.cross_entropy",
+            "torch.Tensor.to",
+            "torch.Tensor.float",
+            "torch.Tensor.view",
+            "torch.Tensor.size",
+            "torch.Tensor.backward",
+            "torch.Tensor.item",
+        )
+
+    def test_huggingface_no_grad_inference_chains(self):
+        self.assert_detects(
+            """
+import torch
+
+@torch.no_grad()
+def infer(batch, device):
+    input_ids = torch.tensor(batch["input_ids"]).to(device)
+    logits = torch.randn(input_ids.size(0), 10)
+    pred = logits.argmax(dim=-1).detach().cpu().numpy()
+    return pred
+""",
+            "torch.no_grad",
+            "torch.tensor",
+            "torch.randn",
+            "torch.Tensor.to",
+            "torch.Tensor.size",
+            "torch.Tensor.argmax",
+            "torch.Tensor.detach",
+            "torch.Tensor.cpu",
+            "torch.Tensor.numpy",
+        )
+
+    def test_huggingface_generation_loop_chains(self):
+        self.assert_detects(
+            """
+import torch
+
+def generate(prompt_ids, vocab_size):
+    input_ids = torch.tensor(prompt_ids).unsqueeze(0).to("cuda")
+    for _ in range(2):
+        logits = torch.randn(input_ids.size(0), input_ids.size(1), vocab_size)
+        next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
+        input_ids = torch.cat([input_ids, next_token], dim=-1)
+    return input_ids.squeeze(0).tolist()
+""",
+            "torch.tensor",
+            "torch.randn",
+            "torch.argmax",
+            "torch.cat",
+            "torch.Tensor.unsqueeze",
+            "torch.Tensor.to",
+            "torch.Tensor.size",
+            "torch.Tensor.squeeze",
+            "torch.Tensor.tolist",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

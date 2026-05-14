@@ -23,8 +23,9 @@ TENSOR_RETURNING_PROPERTIES = {"data", "grad"}
 NON_TENSOR_RETURNING_PROPERTIES = {"device", "dtype", "itemsize", "ndim", "shape"}
 NON_TENSOR_RETURNING_METHODS = {"item", "size", "tolist", "numpy"}
 FALLBACK_TENSOR_METHODS = {
-    "contiguous", "copy_", "cpu", "cuda", "data", "device", "dtype", "float", "half",
-    "item", "reshape", "shape", "size", "to", "view",
+    "argmax", "backward", "bool", "contiguous", "copy_", "cpu", "cuda", "data",
+    "device", "dtype", "float", "half", "item", "long", "mean", "numpy", "reshape",
+    "shape", "size", "to", "tolist", "view",
     "abs", "clone", "detach", "flatten", "permute", "squeeze", "transpose", "unsqueeze",
 }
 
@@ -98,6 +99,17 @@ def _expr_to_name(node: ast.AST) -> Optional[str]:
     return None
 
 
+def _resolve_imported_name(name: Optional[str], imports: Dict[str, str]) -> Optional[str]:
+    if not name:
+        return None
+    parts = name.split(".")
+    for idx in range(len(parts), 0, -1):
+        prefix = ".".join(parts[:idx])
+        if prefix in imports:
+            return ".".join([imports[prefix]] + parts[idx:])
+    return name
+
+
 def _file_uri(path: str) -> str:
     return urljoin("file:", pathname2url(os.path.abspath(path)))
 
@@ -137,8 +149,10 @@ def _tensor_chain_source(
     node: ast.AST,
     tensor_methods: Set[str],
     tensor_vars: Optional[Set[str]] = None,
+    imports: Optional[Dict[str, str]] = None,
 ) -> Optional[str]:
     tensor_vars = tensor_vars or set()
+    imports = imports or {}
     if isinstance(node, ast.Name):
         return "variable" if node.id in tensor_vars else None
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
@@ -148,7 +162,11 @@ def _tensor_chain_source(
         if method in NON_TENSOR_RETURNING_METHODS:
             return None
         if method in tensor_methods or method in TENSOR_CHAIN_METHODS:
-            return method if _tensor_chain_source(node.func.value, tensor_methods, tensor_vars) else None
+            return method if _tensor_chain_source(node.func.value, tensor_methods, tensor_vars, imports) else None
+    if isinstance(node, ast.Call):
+        name = _resolve_imported_name(_expr_to_name(node.func), imports)
+        if name and name.startswith("torch."):
+            return name
     if isinstance(node, ast.Attribute):
         attr = node.attr
         if attr in TENSOR_RETURNING_PROPERTIES:
@@ -156,13 +174,19 @@ def _tensor_chain_source(
         if attr in NON_TENSOR_RETURNING_PROPERTIES:
             return None
         if attr in tensor_methods or attr in TENSOR_CHAIN_METHODS:
-            return attr if _tensor_chain_source(node.value, tensor_methods, tensor_vars) else None
+            return attr if _tensor_chain_source(node.value, tensor_methods, tensor_vars, imports) else None
     if isinstance(node, ast.Subscript):
-        return _tensor_chain_source(node.value, tensor_methods, tensor_vars)
+        return _tensor_chain_source(node.value, tensor_methods, tensor_vars, imports)
     return None
 
 
-def _tensor_like_expr_source(node: ast.AST, tensor_methods: Set[str], tensor_vars: Set[str]) -> Optional[str]:
+def _tensor_like_expr_source(
+    node: ast.AST,
+    tensor_methods: Set[str],
+    tensor_vars: Set[str],
+    imports: Optional[Dict[str, str]] = None,
+) -> Optional[str]:
+    imports = imports or {}
     if isinstance(node, ast.Name):
         return "variable" if node.id in tensor_vars else None
     if isinstance(node, ast.Call):
@@ -173,8 +197,8 @@ def _tensor_like_expr_source(node: ast.AST, tensor_methods: Set[str], tensor_var
             if method in NON_TENSOR_RETURNING_METHODS:
                 return None
             if method in tensor_methods or method in TENSOR_CHAIN_METHODS:
-                return method if _tensor_like_expr_source(node.func.value, tensor_methods, tensor_vars) else None
-        name = _expr_to_name(node.func)
+                return method if _tensor_like_expr_source(node.func.value, tensor_methods, tensor_vars, imports) else None
+        name = _resolve_imported_name(_expr_to_name(node.func), imports)
         if name and name.startswith("torch."):
             return name
     if isinstance(node, ast.Attribute):
@@ -182,14 +206,18 @@ def _tensor_like_expr_source(node: ast.AST, tensor_methods: Set[str], tensor_var
             return None
         if node.attr in TENSOR_RETURNING_PROPERTIES:
             return node.attr
-        return _tensor_chain_source(node, tensor_methods, tensor_vars)
+        return _tensor_chain_source(node, tensor_methods, tensor_vars, imports)
     if isinstance(node, ast.Subscript):
-        return _tensor_like_expr_source(node.value, tensor_methods, tensor_vars)
+        return _tensor_like_expr_source(node.value, tensor_methods, tensor_vars, imports)
     return None
 
 
-def _is_tensor_like_argument(node: ast.AST, tensor_methods: Set[str]) -> bool:
-    return _tensor_like_expr_source(node, tensor_methods, set()) is not None
+def _is_tensor_like_argument(
+    node: ast.AST,
+    tensor_methods: Set[str],
+    imports: Optional[Dict[str, str]] = None,
+) -> bool:
+    return _tensor_like_expr_source(node, tensor_methods, set(), imports) is not None
 
 
 def _iter_call_name(node: ast.AST) -> Optional[str]:
@@ -268,7 +296,9 @@ def infer_tensor_variable_ranges(
     tree: ast.AST,
     tensor_methods: Set[str],
     tensor_params: Optional[Set[Tuple[str, str]]] = None,
+    imports: Optional[Dict[str, str]] = None,
 ) -> Dict[str, List[Tuple[int, int]]]:
+    imports = imports or {}
     tensor_vars: Set[str] = set()
     active_start: Dict[str, int] = {}
     loop_ranges = infer_tensor_loop_ranges(tree)
@@ -287,7 +317,7 @@ def infer_tensor_variable_ranges(
             continue
         line_tensor_vars = set(tensor_vars)
         line_tensor_vars.update(_active_tensor_vars_at(node.lineno, base_ranges))
-        source = _tensor_like_expr_source(value, tensor_methods, line_tensor_vars)
+        source = _tensor_like_expr_source(value, tensor_methods, line_tensor_vars, imports)
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
         for target in targets:
             if isinstance(target, ast.Name):
@@ -319,7 +349,12 @@ def _receiver_tensor_variable_source(
     return None
 
 
-def infer_tensor_function_params(tree: ast.AST, tensor_methods: Set[str]) -> Set[Tuple[str, str]]:
+def infer_tensor_function_params(
+    tree: ast.AST,
+    tensor_methods: Set[str],
+    imports: Optional[Dict[str, str]] = None,
+) -> Set[Tuple[str, str]]:
+    imports = imports or {}
     function_params: Dict[str, List[str]] = {}
     tensor_params: Set[Tuple[str, str]] = set()
 
@@ -334,10 +369,10 @@ def infer_tensor_function_params(tree: ast.AST, tensor_methods: Set[str]) -> Set
         if not params:
             continue
         for index, arg in enumerate(node.args):
-            if index < len(params) and _is_tensor_like_argument(arg, tensor_methods):
+            if index < len(params) and _is_tensor_like_argument(arg, tensor_methods, imports):
                 tensor_params.add((node.func.id, params[index]))
         for keyword in node.keywords:
-            if keyword.arg in params and _is_tensor_like_argument(keyword.value, tensor_methods):
+            if keyword.arg in params and _is_tensor_like_argument(keyword.value, tensor_methods, imports):
                 tensor_params.add((node.func.id, keyword.arg))
     return tensor_params
 
@@ -495,15 +530,8 @@ class CandidateVisitor(ast.NodeVisitor):
         self.seen: Set[Tuple[int, int, str]] = set()
 
     def _resolve_imported(self, node: ast.AST) -> Optional[str]:
-        name = _expr_to_name(node)
-        if not name:
-            return None
-        parts = name.split(".")
-        for idx in range(len(parts), 0, -1):
-            prefix = ".".join(parts[:idx])
-            if prefix in self.imports:
-                return ".".join([self.imports[prefix]] + parts[idx:])
-        return None
+        resolved = _resolve_imported_name(_expr_to_name(node), self.imports)
+        return resolved if resolved and resolved.startswith("torch.") else None
 
     def _add(self, api: str, node: ast.AST, receiver: Optional[ast.AST] = None):
         if not hasattr(node, "lineno"):
@@ -516,7 +544,12 @@ class CandidateVisitor(ast.NodeVisitor):
             positions = _node_hover_positions(receiver)
             line, col = positions[0]
             active_tensor_vars = _active_tensor_vars_at(node.lineno, self.tensor_var_ranges)
-            tensor_chain_source = _tensor_chain_source(receiver, self.tensor_methods, active_tensor_vars)
+            tensor_chain_source = _tensor_chain_source(
+                receiver,
+                self.tensor_methods,
+                active_tensor_vars,
+                self.imports,
+            )
             item.update({
                 "needs_type": True,
                 "receiver_line": line,
@@ -580,8 +613,8 @@ def collect_candidates(content: str, imports: Dict[str, str], tensor_methods: Se
     for node in ast.walk(tree):
         for child in ast.iter_child_nodes(node):
             child.parent = node
-    tensor_params = infer_tensor_function_params(tree, tensor_methods)
-    tensor_var_ranges = infer_tensor_variable_ranges(tree, tensor_methods, tensor_params)
+    tensor_params = infer_tensor_function_params(tree, tensor_methods, imports)
+    tensor_var_ranges = infer_tensor_variable_ranges(tree, tensor_methods, tensor_params, imports)
     visitor = CandidateVisitor(imports, tensor_methods, tensor_params, tensor_var_ranges)
     visitor.visit(tree)
     return visitor.candidates
