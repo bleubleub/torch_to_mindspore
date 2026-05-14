@@ -23,7 +23,8 @@ TENSOR_RETURNING_PROPERTIES = {"data", "grad"}
 NON_TENSOR_RETURNING_PROPERTIES = {"device", "dtype", "itemsize", "ndim", "shape"}
 NON_TENSOR_RETURNING_METHODS = {"item", "size", "tolist", "numpy"}
 FALLBACK_TENSOR_METHODS = {
-    "contiguous", "data", "device", "dtype", "reshape", "shape", "size", "view",
+    "contiguous", "copy_", "cpu", "cuda", "data", "device", "dtype", "float", "half",
+    "item", "reshape", "shape", "size", "to", "view",
     "abs", "clone", "detach", "flatten", "permute", "squeeze", "transpose", "unsqueeze",
 }
 
@@ -228,11 +229,52 @@ def infer_tensor_loop_ranges(tree: ast.AST) -> Dict[str, List[Tuple[int, int]]]:
     return ranges
 
 
-def infer_tensor_variable_ranges(tree: ast.AST, tensor_methods: Set[str]) -> Dict[str, List[Tuple[int, int]]]:
+def infer_tensor_function_param_ranges(
+    tree: ast.AST,
+    tensor_params: Set[Tuple[str, str]],
+) -> Dict[str, List[Tuple[int, int]]]:
+    ranges: Dict[str, List[Tuple[int, int]]] = {}
+    if not tensor_params:
+        return ranges
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        params = {param for function, param in tensor_params if function == node.name}
+        if not params:
+            continue
+        start = node.body[0].lineno if node.body else node.lineno
+        end = getattr(node, "end_lineno", None) or max(
+            getattr(child, "lineno", start) for child in ast.walk(node)
+        )
+        for param in params:
+            ranges.setdefault(param, []).append((start, end))
+    return ranges
+
+
+def _merge_ranges(*range_sets: Dict[str, List[Tuple[int, int]]]) -> Dict[str, List[Tuple[int, int]]]:
+    merged: Dict[str, List[Tuple[int, int]]] = {}
+    for ranges in range_sets:
+        for name, items in ranges.items():
+            merged.setdefault(name, []).extend(items)
+    return merged
+
+
+def _active_tensor_vars_at(line: int, ranges: Dict[str, List[Tuple[int, int]]]) -> Set[str]:
+    return {name for name in ranges if _is_tensor_variable_at(name, line, ranges)}
+
+
+def infer_tensor_variable_ranges(
+    tree: ast.AST,
+    tensor_methods: Set[str],
+    tensor_params: Optional[Set[Tuple[str, str]]] = None,
+) -> Dict[str, List[Tuple[int, int]]]:
     tensor_vars: Set[str] = set()
     active_start: Dict[str, int] = {}
     loop_ranges = infer_tensor_loop_ranges(tree)
-    ranges: Dict[str, List[Tuple[int, int]]] = {name: list(items) for name, items in loop_ranges.items()}
+    param_ranges = infer_tensor_function_param_ranges(tree, tensor_params or set())
+    base_ranges = _merge_ranges(loop_ranges, param_ranges)
+    ranges: Dict[str, List[Tuple[int, int]]] = {name: list(items) for name, items in base_ranges.items()}
     assignments = [
         node for node in ast.walk(tree)
         if isinstance(node, (ast.Assign, ast.AnnAssign)) and hasattr(node, "lineno")
@@ -244,10 +286,7 @@ def infer_tensor_variable_ranges(tree: ast.AST, tensor_methods: Set[str]) -> Dic
         if value is None:
             continue
         line_tensor_vars = set(tensor_vars)
-        line_tensor_vars.update(
-            name for name in loop_ranges
-            if _is_tensor_variable_at(name, node.lineno, loop_ranges)
-        )
+        line_tensor_vars.update(_active_tensor_vars_at(node.lineno, base_ranges))
         source = _tensor_like_expr_source(value, tensor_methods, line_tensor_vars)
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
         for target in targets:
@@ -476,7 +515,8 @@ class CandidateVisitor(ast.NodeVisitor):
         if receiver is not None:
             positions = _node_hover_positions(receiver)
             line, col = positions[0]
-            tensor_chain_source = _tensor_chain_source(receiver, self.tensor_methods)
+            active_tensor_vars = _active_tensor_vars_at(node.lineno, self.tensor_var_ranges)
+            tensor_chain_source = _tensor_chain_source(receiver, self.tensor_methods, active_tensor_vars)
             item.update({
                 "needs_type": True,
                 "receiver_line": line,
@@ -541,7 +581,7 @@ def collect_candidates(content: str, imports: Dict[str, str], tensor_methods: Se
         for child in ast.iter_child_nodes(node):
             child.parent = node
     tensor_params = infer_tensor_function_params(tree, tensor_methods)
-    tensor_var_ranges = infer_tensor_variable_ranges(tree, tensor_methods)
+    tensor_var_ranges = infer_tensor_variable_ranges(tree, tensor_methods, tensor_params)
     visitor = CandidateVisitor(imports, tensor_methods, tensor_params, tensor_var_ranges)
     visitor.visit(tree)
     return visitor.candidates
