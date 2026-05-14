@@ -54,10 +54,19 @@ python convert_to_mindspore.py
 ## 依赖包
 
 ```bash
-pip install libcst pandas openpyxl pyright
+pip install libcst pandas openpyxl
+npm install -g pyright
 ```
 
-`find_torch_api.py` 默认使用 Pyright 做类型辅助识别，以减少 `numpy.reshape`、`Enum.name` 等非 PyTorch 对象被误识别为 `torch.Tensor.*` 的情况。安装 `pyright` 后会提供 `pyright` 和 `pyright-langserver` 命令；如果未安装，脚本只扫描显式导入的 `torch.*`、`torch.nn.*`、`torch.nn.functional.*` 等 API，不猜测实例方法归属。
+`find_torch_api.py` 默认使用 Pyright Language Server 做类型辅助识别，以减少 `numpy.reshape`、`Enum.name` 等非 PyTorch 对象被误识别为 `torch.Tensor.*` 的情况。当前脚本需要当前环境的 `PATH` 中存在 `pyright-langserver` 或 `basedpyright-langserver` 命令；推荐使用 `npm install -g pyright` 安装。`pip install pyright` 如果只提供 `pyright` 命令而不提供 `pyright-langserver`，则不满足当前脚本要求。
+
+安装后可以用下面的命令确认：
+
+```bash
+pyright-langserver --version
+```
+
+如果未安装 language server，脚本只扫描显式导入的 `torch.*`、`torch.nn.*`、`torch.nn.functional.*` 等 API，不猜测实例方法归属。
 
 常用扫描命令：
 

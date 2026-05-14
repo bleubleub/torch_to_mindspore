@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urljoin
 from urllib.request import pathname2url
@@ -362,11 +363,21 @@ def process_directory(
 ) -> List[dict]:
     all_apis = []
     skip_dirs = {".git", ".hg", ".svn", "__pycache__", ".pytest_cache", ".mypy_cache", "converted_files"}
+    python_files = []
     for root, dirs, files in os.walk(directory_path):
         dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".")]
         for file in files:
             if file.endswith(".py"):
-                all_apis.extend(process_file(os.path.join(root, file), mode, resolver, tensor_methods))
+                python_files.append(os.path.join(root, file))
+
+    total_files = len(python_files)
+    print(f"发现 Python 文件数: {total_files}", flush=True)
+    start_time = time.monotonic()
+    for index, file_path in enumerate(python_files, start=1):
+        rel_path = os.path.relpath(file_path, directory_path)
+        elapsed = time.monotonic() - start_time
+        print(f"[{index}/{total_files}] 扫描 {rel_path}，已耗时 {elapsed:.1f}s，已发现 {len(all_apis)} 个API", flush=True)
+        all_apis.extend(process_file(file_path, mode, resolver, tensor_methods))
     return all_apis
 
 
