@@ -1,0 +1,838 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>generic-pytorch-repo 迁移增强方案</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17202a;
+      --muted: #59636f;
+      --line: #d8dee6;
+      --panel: #ffffff;
+      --soft: #f5f7fa;
+      --accent: #0f766e;
+      --accent-2: #b45309;
+      --accent-3: #2563eb;
+      --danger: #b91c1c;
+      --shadow: 0 18px 40px rgba(25, 34, 45, 0.10);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Microsoft YaHei", sans-serif;
+      color: var(--ink);
+      background:
+        linear-gradient(180deg, #eef3f7 0, #ffffff 420px),
+        #ffffff;
+      letter-spacing: 0;
+    }
+
+    main {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 44px 28px 72px;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(360px, 0.9fr);
+      gap: 28px;
+      align-items: stretch;
+      min-height: 460px;
+    }
+
+    .hero-copy {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      padding: 28px 0;
+    }
+
+    .eyebrow {
+      margin: 0 0 14px;
+      color: var(--accent);
+      font-size: 14px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      max-width: 780px;
+      margin: 0;
+      font-size: clamp(42px, 7vw, 76px);
+      line-height: 0.98;
+      font-weight: 780;
+      letter-spacing: 0;
+    }
+
+    .lead {
+      max-width: 720px;
+      margin: 22px 0 0;
+      color: var(--muted);
+      font-size: 20px;
+      line-height: 1.65;
+    }
+
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 28px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 34px;
+      padding: 6px 12px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.75);
+      color: #334155;
+      font-size: 14px;
+      font-weight: 650;
+      border-radius: 999px;
+    }
+
+    .hero-board {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid rgba(23, 32, 42, 0.12);
+      border-radius: 8px;
+      background: #101820;
+      box-shadow: var(--shadow);
+      min-height: 430px;
+    }
+
+    .board-top {
+      height: 42px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 16px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+      background: #0b1218;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #94a3b8;
+    }
+
+    .dot:nth-child(1) { background: #ef4444; }
+    .dot:nth-child(2) { background: #f59e0b; }
+    .dot:nth-child(3) { background: #22c55e; }
+
+    .board-body {
+      padding: 24px;
+      color: #dbeafe;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 14px;
+      line-height: 1.7;
+    }
+
+    .terminal-line {
+      margin: 0 0 9px;
+      white-space: nowrap;
+    }
+
+    .terminal-line .cmd { color: #93c5fd; }
+    .terminal-line .ok { color: #86efac; }
+    .terminal-line .warn { color: #fcd34d; }
+    .terminal-line .dim { color: #94a3b8; }
+    .terminal-line .bad { color: #fca5a5; }
+
+    .flow-mini {
+      position: absolute;
+      left: 24px;
+      right: 24px;
+      bottom: 24px;
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+    }
+
+    .flow-mini div {
+      min-height: 82px;
+      padding: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.06);
+      color: #e2e8f0;
+      font-size: 13px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    .flow-mini strong {
+      display: block;
+      margin-bottom: 6px;
+      color: #ffffff;
+      font-size: 14px;
+    }
+
+    section {
+      margin-top: 58px;
+    }
+
+    .section-head {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 18px;
+    }
+
+    h2 {
+      margin: 0;
+      font-size: 30px;
+      line-height: 1.2;
+      letter-spacing: 0;
+    }
+
+    .section-note {
+      max-width: 520px;
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .card {
+      min-height: 210px;
+      padding: 22px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: 0 8px 20px rgba(23, 32, 42, 0.05);
+    }
+
+    .card h3 {
+      margin: 0 0 12px;
+      font-size: 18px;
+    }
+
+    .card p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.65;
+    }
+
+    .metric {
+      display: inline-flex;
+      margin-bottom: 16px;
+      padding: 5px 9px;
+      border-radius: 5px;
+      background: #e7f7f3;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 780;
+    }
+
+    .timeline {
+      display: grid;
+      gap: 14px;
+    }
+
+    .step {
+      display: grid;
+      grid-template-columns: 76px minmax(0, 1fr) 260px;
+      gap: 18px;
+      align-items: start;
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+
+    .step-index {
+      display: grid;
+      place-items: center;
+      width: 48px;
+      height: 48px;
+      border-radius: 8px;
+      background: #ecfdf5;
+      color: var(--accent);
+      font-weight: 800;
+    }
+
+    .step h3 {
+      margin: 0 0 8px;
+      font-size: 18px;
+    }
+
+    .step p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    .tag-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+
+    .tag {
+      padding: 5px 9px;
+      border-radius: 5px;
+      background: var(--soft);
+      color: #475569;
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    .tool-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+
+    .tool {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      overflow: hidden;
+      box-shadow: 0 8px 20px rgba(23, 32, 42, 0.05);
+    }
+
+    .tool header {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 18px 20px;
+      border-bottom: 1px solid var(--line);
+      background: #f8fafc;
+    }
+
+    .tool h3 {
+      margin: 0;
+      font-size: 18px;
+    }
+
+    .tool-code {
+      margin: 0;
+      padding: 18px 20px;
+      background: #111827;
+      color: #e5e7eb;
+      overflow-x: auto;
+      font-size: 13px;
+      line-height: 1.65;
+    }
+
+    .tool ul {
+      margin: 0;
+      padding: 18px 22px 22px 38px;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    .readiness {
+      display: grid;
+      grid-template-columns: minmax(0, 0.9fr) minmax(320px, 1.1fr);
+      gap: 18px;
+      align-items: stretch;
+    }
+
+    .readiness-copy {
+      padding: 24px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+
+    .readiness-copy h3 {
+      margin: 0 0 12px;
+      font-size: 20px;
+    }
+
+    .readiness-copy p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.7;
+    }
+
+    .readiness-terminal {
+      margin: 0;
+      padding: 22px;
+      border-radius: 8px;
+      background: #111827;
+      color: #e5e7eb;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 14px;
+      line-height: 1.75;
+      overflow-x: auto;
+    }
+
+    .matrix {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    .matrix-panel {
+      padding: 22px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+    }
+
+    .matrix-panel h3 {
+      margin: 0 0 14px;
+      font-size: 18px;
+    }
+
+    .matrix-panel ul {
+      margin: 0;
+      padding-left: 20px;
+      color: var(--muted);
+      line-height: 1.7;
+    }
+
+    .accent {
+      color: var(--accent);
+      font-weight: 760;
+    }
+
+    .warn {
+      color: var(--accent-2);
+      font-weight: 760;
+    }
+
+    .danger {
+      color: var(--danger);
+      font-weight: 760;
+    }
+
+    .footer-band {
+      margin-top: 58px;
+      padding: 28px;
+      border-radius: 8px;
+      background: #17202a;
+      color: #e5e7eb;
+    }
+
+    .footer-band h2 {
+      color: #ffffff;
+    }
+
+    .footer-band p {
+      max-width: 880px;
+      color: #cbd5e1;
+      line-height: 1.7;
+    }
+
+    @media (max-width: 920px) {
+      main {
+        padding: 28px 18px 48px;
+      }
+
+      .hero,
+      .cards,
+      .tool-grid,
+      .readiness,
+      .matrix {
+        grid-template-columns: 1fr;
+      }
+
+      .step {
+        grid-template-columns: 56px minmax(0, 1fr);
+      }
+
+      .tag-list {
+        grid-column: 1 / -1;
+        justify-content: flex-start;
+      }
+
+      .flow-mini {
+        position: static;
+        margin: 8px 24px 24px;
+        grid-template-columns: repeat(2, 1fr);
+      }
+
+      .hero-board {
+        min-height: auto;
+      }
+    }
+
+    @media (max-width: 560px) {
+      h1 {
+        font-size: 42px;
+      }
+
+      .lead {
+        font-size: 17px;
+      }
+
+      .section-head {
+        display: block;
+      }
+
+      .section-note {
+        margin-top: 10px;
+      }
+
+      .flow-mini {
+        grid-template-columns: 1fr;
+      }
+
+      .terminal-line {
+        white-space: normal;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">MindSpore CLI Migration Route Upgrade</p>
+        <h1>generic-pytorch-repo 迁移增强方案</h1>
+        <p class="lead">
+          保留现有 <strong>migrate-agent</strong> 路由框架，只在 generic PyTorch 仓库场景接入
+          Go 原生 API 扫描、映射上下文和 LLM 辅助改写，让迁移从“自由发挥”变成有证据、有约束、可复查的流程。
+        </p>
+        <div class="hero-actions" aria-label="方案标签">
+          <span class="pill">Go 原生 Tool</span>
+          <span class="pill">Pyright LSP 可选增强</span>
+          <span class="pill">内置 JSON 映射</span>
+          <span class="pill">Agent 直接编辑</span>
+          <span class="pill">Rescan 验证</span>
+        </div>
+      </div>
+
+      <div class="hero-board" aria-label="迁移终端示意">
+        <div class="board-top">
+          <span class="dot"></span>
+          <span class="dot"></span>
+          <span class="dot"></span>
+        </div>
+        <div class="board-body">
+          <p class="terminal-line"><span class="cmd">&gt;</span> route: <span class="ok">generic-pytorch-repo</span></p>
+          <p class="terminal-line"><span class="cmd">&gt;</span> readiness: pyright-langserver <span class="bad">missing</span></p>
+          <p class="terminal-line"><span class="warn">fallback</span> static scan enabled</p>
+          <p class="terminal-line"><span class="cmd">&gt;</span> torch_migration_scan path="."</p>
+          <p class="terminal-line"><span class="dim">found</span> 42 torch APIs across 9 files</p>
+          <p class="terminal-line"><span class="dim">mapped</span> 31 direct, 6 alternatives, 5 unresolved</p>
+          <p class="terminal-line"><span class="cmd">&gt;</span> file_context models/net.py</p>
+          <p class="terminal-line"><span class="warn">review</span> Tensor.view, Tensor.size, torch.load</p>
+          <p class="terminal-line"><span class="cmd">&gt;</span> agent edit + rescan</p>
+          <p class="terminal-line"><span class="ok">done</span> residual report generated</p>
+        </div>
+        <div class="flow-mini">
+          <div><strong>Scan</strong>识别 API 和别名</div>
+          <div><strong>LSP</strong>可选增强类型确认</div>
+          <div><strong>Map</strong>匹配 MindSpore 映射</div>
+          <div><strong>Rescan</strong>验证残留风险</div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="section-head">
+        <h2>为什么这样做</h2>
+        <p class="section-note">
+          目标不是替换整个 migrate 流程，而是补齐当前最弱的 generic PyTorch 路由。
+        </p>
+      </div>
+      <div class="cards">
+        <article class="card">
+          <span class="metric">保留专项路线</span>
+          <h3>HF 路由不动</h3>
+          <p>
+            <code>hf-transformers</code> 和 <code>hf-diffusers</code> 继续走已有专项规则，
+            避免把通用迁移逻辑误套到成熟流程上。
+          </p>
+        </article>
+        <article class="card">
+          <span class="metric">增强通用场景</span>
+          <h3>generic 路由结构化</h3>
+          <p>
+            generic PyTorch 仓库先扫描和映射，再让 LLM 改写，减少只靠提示词迁移带来的随机性。
+          </p>
+        </article>
+        <article class="card">
+          <span class="metric">可复查</span>
+          <h3>改完必须复扫</h3>
+          <p>
+            迁移完成不以 LLM 自述为准，而以二次扫描的残留 API、未映射项和低置信度项作为验收依据。
+          </p>
+        </article>
+      </div>
+    </section>
+
+    <section>
+      <div class="section-head">
+        <h2>执行链路</h2>
+        <p class="section-note">
+          这条链路只在 <code>generic-pytorch-repo</code> 被选中时启用。
+        </p>
+      </div>
+      <div class="timeline">
+        <article class="step">
+          <div class="step-index">01</div>
+          <div>
+            <h3>路由判断</h3>
+            <p>
+              <code>migrate-agent</code> 先分析仓库类型。若不是 HF transformers 或 diffusers，
+              并且是普通 PyTorch 项目，则进入 generic PyTorch route。
+            </p>
+          </div>
+          <div class="tag-list">
+            <span class="tag">migrate-agent</span>
+            <span class="tag">route-selector</span>
+          </div>
+        </article>
+
+        <article class="step">
+          <div class="step-index">02</div>
+          <div>
+            <h3>迁移前置检查</h3>
+            <p>
+              <code>/migrate</code> 进入 generic route 后先显示 readiness。若检测到
+              <code>pyright-langserver</code> 或 <code>basedpyright-langserver</code>，
+              启用 LSP 增强识别；若缺失，则提示安装方式并继续使用静态扫描。
+            </p>
+          </div>
+          <div class="tag-list">
+            <span class="tag">readiness</span>
+            <span class="tag">optional pyright</span>
+            <span class="tag">fallback</span>
+          </div>
+        </article>
+
+        <article class="step">
+          <div class="step-index">03</div>
+          <div>
+            <h3>API 扫描和映射</h3>
+            <p>
+              调用 <code>torch_migration_scan</code>，Go 原生扫描 Python 文件，
+              识别 PyTorch API、常见 alias 和 Tensor 方法候选；LSP 可用时对低置信度项做类型确认，
+              再匹配内置 JSON 映射。
+            </p>
+          </div>
+          <div class="tag-list">
+            <span class="tag">torch.*</span>
+            <span class="tag">nn / F alias</span>
+            <span class="tag">hover / definition</span>
+            <span class="tag">mapping JSON</span>
+          </div>
+        </article>
+
+        <article class="step">
+          <div class="step-index">04</div>
+          <div>
+            <h3>文件级上下文</h3>
+            <p>
+              对需要修改的文件调用 <code>torch_migration_file_context</code>，
+              返回该文件 API 列表、映射建议、备注、风险提示和源码片段。
+            </p>
+          </div>
+          <div class="tag-list">
+            <span class="tag">run_id</span>
+            <span class="tag">file context</span>
+            <span class="tag">risk hints</span>
+          </div>
+        </article>
+
+        <article class="step">
+          <div class="step-index">05</div>
+          <div>
+            <h3>LLM 直接改写</h3>
+            <p>
+              不做机械替换。agent 使用现有 <code>read/edit/write</code> 工具，
+              按上下文理解源码并进行 MindSpore 化改写。
+            </p>
+          </div>
+          <div class="tag-list">
+            <span class="tag">read</span>
+            <span class="tag">edit</span>
+            <span class="tag">write</span>
+          </div>
+        </article>
+
+        <article class="step">
+          <div class="step-index">06</div>
+          <div>
+            <h3>复扫与报告</h3>
+            <p>
+              修改后再次扫描，输出残留 Torch API、未映射 API、低置信度项、人工处理项和最终迁移摘要。
+            </p>
+          </div>
+          <div class="tag-list">
+            <span class="tag">rescan</span>
+            <span class="tag">residual report</span>
+            <span class="tag">acceptance</span>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section>
+      <div class="section-head">
+        <h2>Readiness 与 LSP 策略</h2>
+        <p class="section-note">
+          Pyright 是可选增强依赖，不随 <code>ms-cli</code> 安装强制下载。
+        </p>
+      </div>
+      <div class="readiness">
+        <article class="readiness-copy">
+          <h3>内置 Pyright-only LSP</h3>
+          <p>
+            第一版不做通用 plugin LSP。<code>ms-cli</code> 内置 Python/Pyright LSP 调用能力，
+            只在迁移场景需要类型确认时启动。没有 Pyright 时不阻塞迁移，静态扫描继续工作。
+          </p>
+        </article>
+        <pre class="readiness-terminal"><code>Migration readiness:
+  route: generic-pytorch-repo
+  pyright-langserver: missing
+  lsp-enhanced detection: disabled
+  fallback scanner: enabled
+
+To enable better Tensor/API type detection:
+  npm install -g pyright
+  pyright-langserver --version</code></pre>
+      </div>
+    </section>
+
+    <section>
+      <div class="section-head">
+        <h2>新增 Tool 形态</h2>
+        <p class="section-note">
+          Tool 是只读分析能力，默认权限按 read/glob 类工具处理。
+        </p>
+      </div>
+      <div class="tool-grid">
+        <article class="tool">
+          <header>
+            <h3>torch_migration_scan</h3>
+            <span class="tag">repo-level</span>
+          </header>
+          <pre class="tool-code"><code>{
+  "path": ".",
+  "include_tests": true,
+  "limit": 100
+}</code></pre>
+          <ul>
+            <li>递归扫描 Python 文件。</li>
+            <li>识别 torch API、import alias 和 Tensor 方法候选。</li>
+            <li>Pyright LSP 可用时，对低置信度候选做 hover/definition 类型确认。</li>
+            <li>匹配内置 MindSpore 映射 JSON。</li>
+            <li>返回 <code>run_id</code>、覆盖率、按文件聚合列表和临时产物路径。</li>
+          </ul>
+        </article>
+
+        <article class="tool">
+          <header>
+            <h3>torch_migration_file_context</h3>
+            <span class="tag">file-level</span>
+          </header>
+          <pre class="tool-code"><code>{
+  "run_id": "mscli-migrate-20260514-xxx",
+  "file": "models/net.py"
+}</code></pre>
+          <ul>
+            <li>读取扫描产物里的文件级 API 记录。</li>
+            <li>返回可替换接口、其他替代方案、备注和风险提示。</li>
+            <li>补充源码片段，帮助 LLM 按上下文改写。</li>
+            <li>避免一次把全仓库塞给模型。</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section>
+      <div class="section-head">
+        <h2>实现边界</h2>
+        <p class="section-note">
+          第一版重点是把迁移流程从“自由发挥”变成“结构化辅助改写”。
+        </p>
+      </div>
+      <div class="matrix">
+        <article class="matrix-panel">
+          <h3>第一版包含</h3>
+          <ul>
+            <li><span class="accent">Go 原生扫描器</span>：不依赖 Python、pandas 或 libcst。</li>
+            <li><span class="accent">内置 Pyright-only LSP</span>：Pyright 存在时增强类型确认，缺失时降级静态扫描。</li>
+            <li><span class="accent">迁移 readiness 提示</span>：在 <code>/migrate</code> 前置检查里显示 Pyright 状态。</li>
+            <li><span class="accent">内置 JSON 映射</span>：由现有 Excel 映射表生成。</li>
+            <li><span class="accent">临时产物</span>：默认写入系统临时目录，不污染用户项目。</li>
+            <li><span class="accent">skill 文档更新</span>：generic route 强制 scan、context、edit、rescan。</li>
+          </ul>
+        </article>
+
+        <article class="matrix-panel">
+          <h3>第一版不包含</h3>
+          <ul>
+            <li><span class="warn">不强制安装 Pyright</span>，用户未安装时只提示并继续迁移。</li>
+            <li><span class="warn">不做通用 LSP plugin 系统</span>，先只服务 Python/PyTorch 迁移。</li>
+            <li><span class="warn">不做机械自动替换</span>，源码改写由现有 agent 完成。</li>
+            <li><span class="warn">不新增专用 LLM SDK 流程</span>，复用 ms-cli provider 和 agent loop。</li>
+            <li><span class="warn">不替换 HF 专项流程</span>，只增强 generic PyTorch route。</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section>
+      <div class="section-head">
+        <h2>验收标准</h2>
+        <p class="section-note">
+          迁移结果由扫描产物和残留报告支撑，而不是仅凭模型回答。
+        </p>
+      </div>
+      <div class="cards">
+        <article class="card">
+          <span class="metric">Tool Tests</span>
+          <h3>扫描能力正确</h3>
+          <p>
+            覆盖 import alias、API 映射命中、未映射、Tensor 方法低置信度和忽略
+            <code>.git</code>、<code>__pycache__</code>、虚拟环境目录；同时覆盖 Pyright 存在/缺失两种 readiness 分支。
+          </p>
+        </article>
+        <article class="card">
+          <span class="metric">Skill Tests</span>
+          <h3>流程要求明确</h3>
+          <p>
+            generic route 文档必须包含 scan、file context、agent edit、rescan；
+            HF transformers/diffusers 文档不能被 generic 流程覆盖。
+          </p>
+        </article>
+        <article class="card">
+          <span class="metric">Integration</span>
+          <h3>端到端可跑</h3>
+          <p>
+            用小型 PyTorch repo 验证 <code>/migrate</code> 会先扫描、再改写、最后复扫并报告残留风险。
+          </p>
+        </article>
+      </div>
+    </section>
+
+    <div class="footer-band">
+      <h2>最终形态</h2>
+      <p>
+        <code>/migrate</code> 仍然是统一入口；<code>migrate-agent</code> 仍然负责路由。
+        只有当 route 选择为 <code>generic-pytorch-repo</code> 时，才启用
+        <code>torch_migration_scan</code> 和 <code>torch_migration_file_context</code>。
+        如果本机存在 <code>pyright-langserver</code>，扫描阶段会启用 LSP 增强识别；如果缺失，
+        <code>/migrate</code> 会展示 readiness 提示并降级到静态扫描。
+        这样既保留已有专项迁移能力，又把普通 PyTorch 仓库迁移从“提示词驱动”升级为
+        “readiness 检查 + 扫描证据 + 类型确认 + 映射约束 + LLM 改写 + 复扫验收”的稳定链路。
+      </p>
+    </div>
+  </main>
+</body>
+</html>
