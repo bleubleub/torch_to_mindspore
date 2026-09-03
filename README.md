@@ -55,6 +55,43 @@ python convert_to_mindspore.py
 
 ```bash
 pip install libcst pandas openpyxl
+npm install -g pyright
+```
+
+`find_torch_api.py` 默认使用 Pyright Language Server 做类型辅助识别，以减少 `numpy.reshape`、`Enum.name` 等非 PyTorch 对象被误识别为 `torch.Tensor.*` 的情况。当前脚本需要当前环境的 `PATH` 中存在 `pyright-langserver` 或 `basedpyright-langserver` 命令；推荐使用 `npm install -g pyright` 安装。`pip install pyright` 如果只提供 `pyright` 命令而不提供 `pyright-langserver`，则不满足当前脚本要求。
+
+安装后可以用下面的命令确认：
+
+```bash
+pyright-langserver --version
+```
+
+如果未安装 language server，脚本只扫描显式导入的 `torch.*`、`torch.nn.*`、`torch.nn.functional.*` 等 API，不猜测实例方法归属。
+
+常用扫描命令：
+
+```bash
+python find_torch_api.py files_to_be_converted --mode pyright
+python find_torch_api.py files_to_be_converted --mode static
+```
+
+### 仅根据 Torch API 表生成映射结果
+
+如果已有一个只包含 `接口` 列的 Torch API 表格，可以直接追加 MindSpore 映射信息：
+
+```bash
+python map_api_table.py torch_api_list.xlsx
+```
+
+默认会在输入文件同目录生成 `torch_api_list_mindspore_mapping.xlsx`，并追加三列：
+
+| 接口 | 可替换MindSpore接口 | 其他替换方案 | 备注 |
+|------|---------------------|--------------|------|
+
+也可以指定输出路径：
+
+```bash
+python map_api_table.py torch_api_list.xlsx -o output.xlsx
 ```
 
 ### 仅根据 Torch API 表生成映射结果
